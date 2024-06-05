@@ -1,0 +1,106 @@
+version: '3'
+services:
+  reverse-proxy:
+    # The official v2 Traefik docker image
+    image: traefik:v2.10
+    # Enables the web UI and tells Traefik to listen to docker
+    command:
+      --api.insecure=true
+      --providers.docker
+      --providers.docker.exposedbydefault=false
+      --log.level=DEBUG
+      --entryPoints.web.address=:80
+      --entryPoints.websecure.address=:443
+      --entryPoints.ollamaweb.address=:81
+      --entryPoints.ollamawebsecure.address=:444
+      --certificatesresolvers.letsencrypt.acme.dnschallenge=true
+      --certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare
+      --certificatesresolvers.letsencrypt.acme.email=***{CF ACCOUNT EMAIL ADDRESS}***
+      --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+
+    ports:
+      # The HTTP port
+      - "80:80"
+      # The HTTPS port
+      - "443:443"
+      # The Web UI (enabled by --api.insecure=true)
+      - "8080:8080"
+    environment:
+      - CF_API_EMAIL=***{CF ACCOUNT EMAIL ADDRESS}***
+      - CF_DNS_API_TOKEN=***{CF API TOKEN}***
+    volumes:
+      # So that Traefik can listen to the Docker events
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./letsencrypt:/letsencrypt
+    restart: always
+
+  postgres:
+    container_name: postgres
+    hostname: postgres
+    image: postgres:15
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data/pgdata
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_PASSWORD={odoo database password}
+      - POSTGRES_USER=odoo
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    restart: always
+
+  odoo:
+    container_name: odoo
+    hostname: odoo
+    image: odoo:16
+    command:
+      --proxy-mode
+    depends_on:
+      - postgres
+      - reverse-proxy
+    ports:
+      - "8069:8069"
+    labels:
+      # # global config       
+      - "traefik.enable=true"
+      # # main routers 8069 web rule "/*"
+      - "traefik.http.routers.odoo-http.entrypoints=web"
+      - "traefik.http.routers.odoo-http.rule=Host(`DOMAIN NAME`)"
+      - "traefik.http.routers.odoo-http.middlewares=odoo-https,gzip"
+      - "traefik.http.routers.odoo-http.service=odoo@docker"
+      
+      - "traefik.http.routers.odoo.tls=true"
+      - "traefik.http.routers.odoo.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.odoo.entrypoints=websecure"
+      - "traefik.http.routers.odoo.rule=Host(`DOMAIN NAME`)"
+      - "traefik.http.routers.odoo.service=odoo@docker"
+      - "traefik.http.routers.odoo.middlewares=gzip"
+      - "traefik.http.services.odoo.loadbalancer.server.port=8069"
+      
+      # # main routers 8072 websocket rule "/websocket"
+      - "traefik.http.routers.backend-websock.tls=true"
+      - "traefik.http.routers.backend-websock.entrypoints=websecure"
+      - "traefik.http.routers.backend-websock.rule=Path(`/websocket`)"
+      - "traefik.http.routers.backend-websock.middlewares=upgradeheader,gzip"
+      - "traefik.http.routers.backend-websock.service=backend-websock@docker"
+      - "traefik.http.services.backend-websock.loadbalancer.server.port=8072"
+      # # redirect to https
+      - "traefik.http.middlewares.odoo-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.odoo-https.redirectscheme.permanent=true"
+      - "traefik.http.middlewares.odoo-https.redirectscheme.port=443"
+      # # upgrade headers 
+      - "traefik.http.middlewares.upgradeheader.headers.customRequestHeaders.Upgrade=websocket"
+      - "traefik.http.middlewares.upgradeheader.headers.customRequestHeaders.Connection=Upgrade"
+      - "traefik.http.middlewares.upgradeheader.headers.hostsproxyheaders=websocket,Upgrade"
+      - "traefik.http.middlewares.upgradeheader.headers.forcestsheader=true"
+      # # gzip compress
+      - "traefik.http.middlewares.gzip.compress=true"
+    volumes:
+      - odoo-web-data:/var/lib/odoo
+    environment:
+    - HOST=postgres
+    - USER=odoo
+    - PASSWORD={odoo database password}
+    restart: always
+
+volumes:
+  odoo-web-data:
+  odoo-db-data:
